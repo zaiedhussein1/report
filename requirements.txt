@@ -1,0 +1,23 @@
+# Base
+python>=3.8
+pandas
+scikit-learn
+Pillow
+opencv-python
+matplotlib
+transformers
+
+# PyTorch (CPU specific versions)
+# Find appropriate URLs from https://pytorch.org/get-started/previous-versions/
+torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.16.0+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# NLP Evaluation
+nltk
+pycocoevalcap
+
+# Optional for advanced features/logging
+# tensorboard
+# wandb
+# chexpert-labeler (placeholder, will need specific package if available)
+# GNN libraries (e.g., pyg)
