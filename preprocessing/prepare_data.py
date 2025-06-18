@@ -1,135 +1,107 @@
 import pandas as pd
+import numpy as np
+import ast
+
+# Adjust path to import from parent directory's modules if preprocess_text is not in the same dir
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from preprocessing.preprocess_text import tokenize_text # Ensure this import works
 
 def load_and_preprocess_data(reports_path, projections_path, output_path):
-    """
-    Loads, preprocesses, and merges report and projection data.
-    """
-    # 1. Read CSV files into pandas DataFrames
     try:
         reports_df = pd.read_csv(reports_path)
         projections_df = pd.read_csv(projections_path)
     except FileNotFoundError as e:
         print(f"Error: One or both CSV files not found. {e}")
-        return
+        return None
 
-    print("--- Reports DataFrame ---")
-    print(reports_df.head())
-    print(reports_df.info())
-    print("\n--- Projections DataFrame ---")
-    print(projections_df.head())
-    print(projections_df.info())
+    # print("--- Reports DataFrame ---"); print(reports_df.head(2)) # Verbosity reduced
+    # print("\n--- Projections DataFrame ---"); print(projections_df.head(2))
 
-    # 2. Perform an inner join on the uid column
     merged_df = pd.merge(reports_df, projections_df, on='uid', how='inner')
-    print("\n--- Merged DataFrame ---")
-    print(merged_df.head())
-    print(merged_df.info())
+    # print("\n--- Merged DataFrame ---"); print(merged_df.head(2))
 
-    # 3. Filter the merged DataFrame to keep only studies that have both 'Frontal' and 'Lateral' projections
-    # Group by 'uid' and check if both 'Frontal' and 'Lateral' are present in 'projection'
     def has_both_projections(group):
         return 'Frontal' in group['projection'].values and 'Lateral' in group['projection'].values
 
-    # This part needs adjustment: we need to filter the original merged_df based on uids that satisfy the condition
-    # First, identify the uids that have both projections
     uids_with_both_projections = merged_df.groupby('uid').filter(has_both_projections)['uid'].unique()
+    if len(uids_with_both_projections) == 0:
+        print("No UIDs found with both Frontal and Lateral projections. Output will be empty.")
+        # Create an empty DataFrame with expected columns to avoid downstream errors if possible
+        # Or handle this more gracefully in consuming scripts.
+        # For now, let's return None as the original script did for other errors.
+        return None
 
-    # Then, filter the merged_df for these uids and create a copy to avoid SettingWithCopyWarning
     filtered_df = merged_df[merged_df['uid'].isin(uids_with_both_projections)].copy()
+    # print("\n--- Filtered DataFrame (studies with Frontal and Lateral projections) ---"); print(filtered_df.head(2))
+    # print(f"Shape after filtering: {filtered_df.shape}")
 
-    # Since the above filtering might still keep separate rows for 'Frontal' and 'Lateral' for the same UID,
-    # we might want to aggregate image filenames or just keep one record per UID if specific image data isn't critical at this stage.
-    # For now, the task seems to imply keeping the report data, so we can drop duplicates based on 'uid' after ensuring they have both projections.
-    # However, the prompt implies "studies that have both", so the `filtered_df` should be correct.
-    # Let's re-evaluate if the goal is one row per study or multiple rows if a study has multiple images that fit.
-    # The prompt mentions "filter the merged DataFrame", suggesting the rows themselves are filtered.
-    # And "Create a new column full_text" implies this is done on the filtered rows.
+    if filtered_df.empty:
+        print("Filtered DataFrame is empty (after filtering for projections). No data to process.")
+        return None
 
-    # Let's refine the filtering: we want to keep the *report data* for uids that have both projections.
-    # The individual projection rows are useful for now.
-    print("\n--- Filtered DataFrame (studies with Frontal and Lateral projections) ---")
-    print(filtered_df.head())
-    print(filtered_df.info())
-    print(f"Shape after filtering for both projections: {filtered_df.shape}")
-
-
-    # 4. Create a new column full_text by concatenating the findings and impression columns
-    # Ensure findings and impressions are strings and handle potential NaN values
     filtered_df.loc[:, 'findings'] = filtered_df['findings'].fillna('')
     filtered_df.loc[:, 'impression'] = filtered_df['impression'].fillna('')
     filtered_df.loc[:, 'full_text'] = filtered_df['findings'] + ' ' + filtered_df['impression']
-
-    # 5. Clean the full_text column
     filtered_df.loc[:, 'full_text'] = filtered_df['full_text'].str.replace('XXXX', '', regex=False)
     filtered_df.loc[:, 'full_text'] = filtered_df['full_text'].str.lower()
-    # Also clean up extra whitespace that might result from concatenation or missing XXXXX
     filtered_df.loc[:, 'full_text'] = filtered_df['full_text'].str.strip().str.replace(r'\s+', ' ', regex=True)
 
+    # Add BioBERT tokenization outputs (input_ids, attention_mask)
+    if not filtered_df['full_text'].empty:
+        print("Tokenizing 'full_text' with BioBERT...")
+        # Assuming tokenize_text expects a pandas Series
+        tokenized_outputs = tokenize_text(filtered_df['full_text'])
+        filtered_df.loc[:, 'input_ids'] = [str(ids) for ids in tokenized_outputs['input_ids']]
+        filtered_df.loc[:, 'attention_mask'] = [str(mask) for mask in tokenized_outputs['attention_mask']]
+        print("Tokenization complete. 'input_ids' and 'attention_mask' columns added.")
+    else:
+        print("Warning: 'full_text' column is empty or missing. Skipping BioBERT tokenization.")
+        filtered_df.loc[:, 'input_ids'] = [str([]) for _ in range(len(filtered_df))] # Empty list string
+        filtered_df.loc[:, 'attention_mask'] = [str([]) for _ in range(len(filtered_df))]
 
-    print("\n--- Processed DataFrame with full_text ---")
-    print(filtered_df.head())
-    print(f"Shape of the finally processed DataFrame: {filtered_df.shape}")
 
-    # 6. Save the processed DataFrame
+    # Add dummy CheXpert labels
+    num_chexpert_labels = 14
+    chexpert_labels_list_of_lists = [
+        list(np.random.randint(0, 2, size=num_chexpert_labels)) for _ in range(len(filtered_df))
+    ]
+    filtered_df.loc[:, 'chexpert_labels_str'] = [str(labels) for labels in chexpert_labels_list_of_lists]
+    print("Dummy CheXpert labels added as 'chexpert_labels_str'.")
+
+    print("\n--- Processed DataFrame (first 2 rows relevant columns) ---")
+    cols_to_show = ['uid', 'full_text']
+    if 'input_ids' in filtered_df.columns: cols_to_show.append('input_ids')
+    if 'chexpert_labels_str' in filtered_df.columns: cols_to_show.append('chexpert_labels_str')
+    print(filtered_df[cols_to_show].head(2))
+    # print(f"Shape of the finally processed DataFrame: {filtered_df.shape}")
+
     try:
         filtered_df.to_csv(output_path, index=False)
         print(f"\nSuccessfully saved processed data to {output_path}")
     except Exception as e:
         print(f"Error saving DataFrame to CSV: {e}")
+        return None
 
     return filtered_df
 
 if __name__ == '__main__':
-    # Use these paths for actual Kaggle environment
-    # REPORTS_CSV = '/kaggle/input/chest-xrays-indiana-university/indiana_reports.csv'
-    # PROJECTIONS_CSV = '/kaggle/input/chest-xrays-indiana-university/indiana_projections.csv'
-
-    # Using dummy paths for local testing
     REPORTS_CSV = 'data/dummy_reports.csv'
     PROJECTIONS_CSV = 'data/dummy_projections.csv'
-
     OUTPUT_CSV = 'data/processed_reports_with_images.csv'
 
-    # Create the output directory if it doesn't exist (relevant for the main data path)
-    # import os
-    # os.makedirs('data/', exist_ok=True) # Ensured by previous steps for dummy data
+    print(f"Running prepare_data.py with dummy data: {REPORTS_CSV}, {PROJECTIONS_CSV}")
+    processed_data = load_and_preprocess_data(REPORTS_CSV, PROJECTIONS_CSV, OUTPUT_CSV)
 
-    processed_data_df = load_and_preprocess_data(REPORTS_CSV, PROJECTIONS_CSV, OUTPUT_CSV)
-
-    if processed_data_df is not None:
-        print("\n--- Original Processed DataFrame ---")
-        print(processed_data_df.head())
-        print(f"Shape: {processed_data_df.shape}")
-
-        if not processed_data_df.empty and 'full_text' in processed_data_df.columns:
-            from preprocess_text import tokenize_text
-
-            print("\n--- Tokenizing full_text ---")
-            # Ensure 'full_text' is not empty and contains strings
-            texts_to_tokenize = processed_data_df['full_text'].fillna('').astype(str)
-
-            if not texts_to_tokenize.empty:
-                tokenized_outputs = tokenize_text(texts_to_tokenize)
-
-                # Store tokenized outputs as strings of lists in the DataFrame
-                processed_data_df['input_ids'] = [str(ids) for ids in tokenized_outputs['input_ids']]
-                processed_data_df['attention_mask'] = [str(mask) for mask in tokenized_outputs['attention_mask']]
-
-                print("\n--- DataFrame with Tokenized Outputs (first few rows) ---")
-                print(processed_data_df[['uid', 'full_text', 'input_ids', 'attention_mask']].head())
-                print(f"Shape after adding token columns: {processed_data_df.shape}")
-
-                # Save the DataFrame with tokenized outputs
-                try:
-                    processed_data_df.to_csv(OUTPUT_CSV, index=False)
-                    print(f"\nSuccessfully saved DataFrame with tokenized outputs to {OUTPUT_CSV}")
-                except Exception as e:
-                    print(f"Error saving DataFrame with tokenized outputs to CSV: {e}")
-            else:
-                print("No text found to tokenize.")
-        else:
-            print("DataFrame is empty or 'full_text' column is missing, skipping tokenization.")
-
-        print("\n--- Final Check: Head of processed_data_df from main (with tokens) ---")
-        print(processed_data_df.head())
-        print(f"Final shape: {processed_data_df.shape}")
+    if processed_data is not None:
+        print("\n--- Final Check: Head of processed_data from main ---")
+        cols_to_show_final = ['uid', 'filename', 'projection', 'full_text']
+        if 'input_ids' in processed_data.columns: cols_to_show_final.append('input_ids')
+        if 'attention_mask' in processed_data.columns: cols_to_show_final.append('attention_mask')
+        if 'chexpert_labels_str' in processed_data.columns: cols_to_show_final.append('chexpert_labels_str')
+        print(processed_data[cols_to_show_final].head())
+        print(f"Final shape: {processed_data.shape}")
+        print(f"Columns: {processed_data.columns.tolist()}")
+    else:
+        print("Data processing failed.")

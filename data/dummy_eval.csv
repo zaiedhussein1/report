@@ -1,0 +1,5 @@
+uid,filename,projection,full_text,input_ids,attention_mask
+eval1,eval_f1.png,Frontal,this is a test report.,"[101, 1142, 1110, 170, 2774, 2065, 102]","[1,1,1,1,1,1,1]"
+eval1,eval_l1.png,Lateral,this is a test report.,"[101, 1142, 1110, 170, 2774, 2065, 102]","[1,1,1,1,1,1,1]"
+eval2,eval_f2.png,Frontal,another example text here.,"[101, 1330, 1859, 3087, 1303, 102]","[1,1,1,1,1,1]"
+eval2,eval_l2.png,Lateral,another example text here.,"[101, 1330, 1859, 3087, 1303, 102]","[1,1,1,1,1,1]"

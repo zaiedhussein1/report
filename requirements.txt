@@ -1,6 +1,7 @@
 # Base
-python>=3.8
+# python>=3.8 # This should not be a pip requirement
 pandas
+numpy~=1.26.0 # For compatibility with torch and torchvision
 scikit-learn
 Pillow
 opencv-python
@@ -8,9 +9,8 @@ matplotlib
 transformers
 
 # PyTorch (CPU specific versions)
-# Find appropriate URLs from https://pytorch.org/get-started/previous-versions/
-torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
-torchvision==0.16.0+cpu --index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0
+torchvision==0.21.0 # Compatible with torch 2.6.0
 
 # NLP Evaluation
 nltk

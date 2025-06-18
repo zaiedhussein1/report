@@ -2,14 +2,13 @@ import torch
 from torch.utils.data import Dataset
 import pandas as pd
 import ast  # For safely evaluating string representations of lists
+from PIL import Image
+import torchvision.transforms as transforms
+import os
+import numpy as np # Though not directly used here, good to have for context if dealing with np arrays before tensor conversion
 
 class RadiologyDataset(Dataset):
-    def __init__(self, csv_file_path, image_base_path=""): # Add image_base_path if needed
-        """
-        Args:
-            csv_file_path (string): Path to the csv file with processed reports and image info.
-            image_base_path (string): Base path for image filenames if they are relative.
-        """
+    def __init__(self, csv_file_path, image_base_path="", train_mode=True):
         self.image_base_path = image_base_path
 
         try:
@@ -23,107 +22,126 @@ class RadiologyDataset(Dataset):
             self.samples = []
             return
 
-        # Parse stringified lists into actual lists of integers
+        # Parse stringified lists into actual lists of numbers/integers
+        # For input_ids and attention_mask (text tokens)
         for col in ['input_ids', 'attention_mask']:
             if col in df.columns:
                 try:
-                    # Ensure the column is treated as string before applying ast.literal_eval
                     df[col] = df[col].astype(str).apply(ast.literal_eval)
                 except (ValueError, SyntaxError) as e:
-                    print(f"Error parsing column {col}: {e}. Ensure it contains valid list strings.")
-                    # Handle cases where some rows might be unparseable, e.g., fill with None or drop
-                    # For now, if parsing fails for any row, we might have an issue with the whole column.
-                    # Depending on robustness needs, one might add row-specific error handling.
+                    print(f"Error parsing text token column {col}: {e}. Ensure it contains valid list strings.")
                     self.samples = []
                     return
-            else:
-                print(f"Warning: Column {col} not found in CSV. It will not be available in the dataset.")
+            # else: # Commented out to reduce noise, as these might not always be present if only evaluating images
+                # print(f"Warning: Text token column {col} not found in CSV.")
 
+        # Parse CheXpert labels string
+        if 'chexpert_labels_str' in df.columns:
+            try:
+                df['chexpert_labels'] = df['chexpert_labels_str'].astype(str).apply(ast.literal_eval)
+            except (ValueError, SyntaxError) as e:
+                print(f"Error parsing 'chexpert_labels_str' column: {e}. Ensure it contains valid list strings.")
+                self.samples = []
+                return
+        else:
+            print("Warning: 'chexpert_labels_str' column not found in CSV. CheXpert labels will not be available.")
+            # Add a dummy column of Nones or empty lists if critical for downstream code expecting the key
+            df['chexpert_labels'] = [None] * len(df)
+
+
+        if train_mode:
+            self.transform = transforms.Compose([
+                transforms.Resize((256, 256)),
+                transforms.RandomCrop((224, 224)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=15),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                transforms.ToTensor(),
+                # Cutout(n_holes=1, length=40), # Assuming Cutout is defined if used
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
 
         self.samples = []
-        # Group by 'uid' to consolidate report text and pair frontal/lateral images
         for uid, group in df.groupby('uid'):
-            # Assuming 'full_text', 'input_ids', 'attention_mask' are the same for all rows of the same uid
-            # Take these from the first row of the group
-            report_data = group.iloc[0]
+            report_data = group.iloc[0] # Contains 'input_ids', 'attention_mask', 'full_text', 'chexpert_labels'
 
-            input_ids = report_data.get('input_ids')
-            attention_mask = report_data.get('attention_mask')
+            # Ensure essential text data is present if needed (might be optional depending on use case)
+            # input_ids = report_data.get('input_ids')
+            # attention_mask_text = report_data.get('attention_mask') # Renamed to avoid clash if image attention is used later
 
-            if not isinstance(input_ids, list) or not isinstance(attention_mask, list):
-                print(f"Warning: UID {uid} has improperly parsed tokenized report data (expected list). Skipping. Type input_ids: {type(input_ids)}, Type attention_mask: {type(attention_mask)}")
-                continue
-
-            frontal_image_path = None
-            lateral_image_path = None
+            frontal_image_filename = None
+            lateral_image_filename = None
 
             for _, row in group.iterrows():
                 projection = row.get('projection', '').lower()
                 filename = row.get('filename', '')
+                if projection == 'frontal': frontal_image_filename = filename
+                elif projection == 'lateral': lateral_image_filename = filename
 
-                if self.image_base_path and filename: # Prepend base path if filename is relative
-                    current_image_path = f"{self.image_base_path.rstrip('/')}/{filename}"
-                else:
-                    current_image_path = filename
-
-                if projection == 'frontal':
-                    frontal_image_path = current_image_path
-                elif projection == 'lateral':
-                    lateral_image_path = current_image_path
-
-            # Only include samples that have both frontal and lateral images
-            if frontal_image_path and lateral_image_path:
+            if frontal_image_filename and lateral_image_filename:
                 sample = {
                     'uid': uid,
-                    'frontal_image_path': frontal_image_path,
-                    'lateral_image_path': lateral_image_path,
-                    'input_ids': input_ids,
-                    'attention_mask': attention_mask,
-                    'full_text': report_data.get('full_text', '') # For reference
+                    'frontal_image_filename': frontal_image_filename,
+                    'lateral_image_filename': lateral_image_filename,
+                    'input_ids': report_data.get('input_ids'), # May be None if not present
+                    'attention_mask': report_data.get('attention_mask'), # May be None
+                    'full_text': report_data.get('full_text', ''),
+                    'chexpert_labels': report_data.get('chexpert_labels') # Parsed list of labels
                 }
                 self.samples.append(sample)
-            else:
-                # This case should ideally not happen if prepare_data.py filters correctly
-                print(f"Warning: UID {uid} is missing either frontal or lateral image path after grouping. Skipping.")
+            # else: # Reduce noise, this case is handled by empty self.samples
+                # print(f"Warning: UID {uid} is missing image paths. Skipping.")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        item_dict = {'uid': sample['uid'], 'full_text': sample['full_text']}
 
-        # Convert lists to tensors
-        input_ids_tensor = torch.tensor(sample['input_ids'], dtype=torch.long)
-        attention_mask_tensor = torch.tensor(sample['attention_mask'], dtype=torch.long)
+        # Image processing
+        frontal_image_path = os.path.join(self.image_base_path, sample['frontal_image_filename'])
+        lateral_image_path = os.path.join(self.image_base_path, sample['lateral_image_filename'])
+        try:
+            frontal_image_pil = Image.open(frontal_image_path).convert('RGB')
+            lateral_image_pil = Image.open(lateral_image_path).convert('RGB')
+            if self.transform:
+                item_dict['frontal_image'] = self.transform(frontal_image_pil)
+                item_dict['lateral_image'] = self.transform(lateral_image_pil)
+        except FileNotFoundError as e:
+            print(f"Error: Image file not found for UID {sample['uid']}. Path: {e.filename}")
+            # Return images as None or handle as error
+            item_dict['frontal_image'] = None
+            item_dict['lateral_image'] = None
 
-        # Placeholder for image loading and transformation
-        # from PIL import Image
-        # frontal_image = Image.open(sample['frontal_image_path']).convert('RGB')
-        # lateral_image = Image.open(sample['lateral_image_path']).convert('RGB')
-        # if hasattr(self, 'transform') and self.transform:
-        #     frontal_image = self.transform(frontal_image)
-        #     lateral_image = self.transform(lateral_image)
+        # Text data processing (if present)
+        if sample['input_ids'] is not None:
+            item_dict['input_ids'] = torch.tensor(sample['input_ids'], dtype=torch.long)
+        if sample['attention_mask'] is not None: # This is for text embedder
+            item_dict['attention_mask'] = torch.tensor(sample['attention_mask'], dtype=torch.long)
 
-        return {
-            'uid': sample['uid'],
-            'frontal_image_path': sample['frontal_image_path'], # Path for now, will be image tensor later
-            'lateral_image_path': sample['lateral_image_path'], # Path for now, will be image tensor later
-            'input_ids': input_ids_tensor,
-            'attention_mask': attention_mask_tensor,
-            'full_text': sample['full_text'] # For debugging or reference
-            # 'frontal_image': frontal_image, # To be added
-            # 'lateral_image': lateral_image, # To be added
-        }
+        # CheXpert labels processing (if present)
+        if sample['chexpert_labels'] is not None:
+            try:
+                item_dict['chexpert_labels'] = torch.tensor(sample['chexpert_labels'], dtype=torch.float) # Use float for BCEWithLogitsLoss
+            except TypeError: # If sample['chexpert_labels'] was None and couldn't be converted
+                 print(f"Warning: CheXpert labels for UID {sample['uid']} are None or invalid type, cannot convert to tensor.")
+                 item_dict['chexpert_labels'] = None # Or a default tensor: torch.zeros(14, dtype=torch.float)
+
+        return item_dict
 
 if __name__ == '__main__':
-    # This assumes 'data/processed_reports_with_images.csv' exists and is populated
-    # from the previous steps (using dummy data).
-    # The dummy CSV has uid 1 with both Frontal and Lateral images.
-
     dummy_csv_path = 'data/processed_reports_with_images.csv'
+    dummy_image_base_path = 'data/dummy_images/'
 
     print(f"Attempting to load dataset from: {dummy_csv_path}")
-    dataset = RadiologyDataset(csv_file_path=dummy_csv_path)
+    dataset = RadiologyDataset(csv_file_path=dummy_csv_path, image_base_path=dummy_image_base_path, train_mode=False)
 
     print(f"Dataset length: {len(dataset)}")
 
@@ -134,41 +152,22 @@ if __name__ == '__main__':
             for key, value in sample_0.items():
                 if isinstance(value, torch.Tensor):
                     print(f"  {key}: Tensor of shape {value.shape}, dtype {value.dtype}")
+                elif value is None:
+                     print(f"  {key}: None")
                 else:
-                    print(f"  {key}: {value}")
+                    print(f"  {key}: (Type: {type(value)}) {value}")
+
+            # Specific check for chexpert_labels
+            if 'chexpert_labels' in sample_0 and sample_0['chexpert_labels'] is not None:
+                print(f"  CheXpert labels (sample 0) value: {sample_0['chexpert_labels']}")
+                assert sample_0['chexpert_labels'].shape[0] == 14, "CheXpert labels should have 14 values."
+                assert sample_0['chexpert_labels'].dtype == torch.float32, "CheXpert labels should be FloatTensor."
+            else:
+                print("  CheXpert labels not found or None in sample 0.")
+
         except Exception as e:
             print(f"Error retrieving or printing sample 0: {e}")
-
-        if len(dataset) > 1: # If there's more than one unique UID processed
-            print("\nSample 1 (if exists):")
-            try:
-                sample_1 = dataset[1]
-                for key, value in sample_1.items():
-                    if isinstance(value, torch.Tensor):
-                        print(f"  {key}: Tensor of shape {value.shape}, dtype {value.dtype}")
-                    else:
-                        print(f"  {key}: {value}")
-            except IndexError:
-                print("  Sample 1 does not exist.")
-            except Exception as e:
-                print(f"Error retrieving or printing sample 1: {e}")
-
+            import traceback
+            traceback.print_exc()
     else:
-        print("Dataset is empty. Check CSV path, content, and parsing logic in __init__.")
-
-    # Example of how to handle a base image path:
-    # print("\n--- Testing with a base image path ---")
-    # kaggle_image_base = "/mnt/data/dummy_images/" # Replace with a real path if testing image loading
-    # # To make this testable, let's assume dummy filenames are just 'filename.png'
-    # # and we want to prepend a path.
-    # # We would need to ensure the filenames in the dummy CSV are suitable for this.
-    # # e.g. '1_IM-0001-4001.dcm.png' would become '/mnt/data/dummy_images/1_IM-0001-4001.dcm.png'
-
-    # dataset_with_base_path = RadiologyDataset(csv_file_path=dummy_csv_path, image_base_path=kaggle_image_base)
-    # if len(dataset_with_base_path) > 0:
-    #     print("\nSample 0 with base image path:")
-    #     sample_0_bp = dataset_with_base_path[0]
-    #     print(f"  Frontal Image Path: {sample_0_bp['frontal_image_path']}")
-    #     print(f"  Lateral Image Path: {sample_0_bp['lateral_image_path']}")
-    # else:
-    #     print("Dataset (with base path) is empty.")
+        print("Dataset is empty.")

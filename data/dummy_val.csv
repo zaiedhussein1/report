@@ -1,0 +1,5 @@
+uid,filename,projection,full_text,input_ids,attention_mask
+val1,val_f1.png,Frontal,dummy val report one.,"[101,1,2,102]","[1,1,1,1]"
+val1,val_l1.png,Lateral,dummy val report one.,"[101,1,2,102]","[1,1,1,1]"
+val2,val_f2.png,Frontal,dummy val report two.,"[101,3,4,102]","[1,1,1,1]"
+val2,val_l2.png,Lateral,dummy val report two.,"[101,3,4,102]","[1,1,1,1]"
